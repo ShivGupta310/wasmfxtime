@@ -1069,6 +1069,43 @@ impl CallThreadState {
             return TrapTest::NotWasm;
         };
 
+        // [wasmfx] Guard-page detection. range() includes the guard page,
+        // which is the lowest host page of the mapping (mmap-allocated stacks
+        // only). A fault there is a continuation stack overflow that bypassed
+        // the prologue check: turn it into a StackOverflow trap.
+        #[cfg(all(has_native_signals, unix, not(miri)))]
+        {
+            use crate::runtime::vm::stack_switching::VMStackChain;
+            let guard = unsafe {
+                let vsc = self.vm_store_context.get().as_ptr();
+                match &*(*vsc).stack_chain.get() {
+                    VMStackChain::Continuation(c) => {
+                        let stack = (*c.as_ptr()).fiber_stack();
+                        if stack.is_from_raw_parts() {
+                            None
+                        } else {
+                            stack.range().map(|r| {
+                                r.start..r.start + crate::runtime::vm::host_page_size()
+                            })
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            if let (Some(addr), Some(guard)) = (faulting_addr, guard) {
+                if guard.contains(&addr) {
+                    let msg = b"[wasmfx] SIGSEGV in CONTINUATION guard page -> StackOverflow\n";
+                    unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+                    self.set_jit_trap(
+                        regs,
+                        None,
+                        wasmtime_environ::CompiledTrap::Normal(wasmtime_environ::Trap::StackOverflow),
+                    );
+                    return TrapTest::Trap(self.entry_trap_handler());
+                }
+            }
+        }
+
         // If the fault was at a location that was not marked as potentially
         // trapping, then that's a bug in Cranelift/Winch/etc. Don't try to
         // catch the trap and pretend this isn't wasm so the program likely
