@@ -1086,7 +1086,19 @@ impl CallThreadState {
             wasmtime_environ::CompiledTrap::Normal(wasmtime_environ::Trap::StackOverflow)
         ){
             STACK_OVERFLOW_TRAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let msg = b"[wasmfx] stack overflow trap intercepted\n";
+            //check which stack is running/Plain ptr read signal safe
+            let on_continuation = unsafe{
+                let vsc = self.vm_store_context.get().as_ref();
+                matches!(
+                    *(*vsc).stack_chain.get(),
+                    crate::runtime::vm::stack_switching::VMStackChain::Continuation(_)
+                )
+            };
+            let msg: &[u8] = if on_continuation {
+                b"[wasmfx] stack overflow on CONTINUATION stack\n"
+            } else {
+                b"[wasmfx] stack overflow on MAIN stack\n"
+            };
             unsafe {
                 libc::write(2, msg.as_ptr().cast(), msg.len());
             }
