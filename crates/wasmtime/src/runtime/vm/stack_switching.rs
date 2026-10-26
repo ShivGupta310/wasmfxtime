@@ -240,10 +240,17 @@ pub fn cont_new(
     let stack_pointer = contref.stack.control_context_stack_pointer();
     // Same caveat regarding stack_limit here as described in
     // `wasmtime::runtime::func::EntryStoreContext::enter_wasm`.
-    let wasm_stack_limit = core::cmp::max(
-        stack_pointer - store.engine().config().max_wasm_stack,
-        tsp as usize - stack_size,
-    );
+    // [wasmfx] EXPERIMENT: when true, set the limit to 0 so the prologue
+    // check never fires and overflow runs into the guard page instead.
+    const WASMFX_NO_CONT_LIMIT: bool = true;
+    let wasm_stack_limit = if WASMFX_NO_CONT_LIMIT {
+        0
+    } else {
+        core::cmp::max(
+            stack_pointer - store.engine().config().max_wasm_stack,
+            tsp as usize - stack_size,
+        )
+    };
     let limits = VMStackLimits::with_stack_limit(wasm_stack_limit);
     let csi = &mut contref.common_stack_information;
     csi.state = VMStackState::Fresh;
