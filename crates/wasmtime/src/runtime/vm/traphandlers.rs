@@ -33,6 +33,10 @@ use core::num::NonZeroU32;
 use core::ptr::{self, NonNull};
 use wasmtime_unwinder::Handler;
 
+/// [wasmfx] Number of stack-overflow traps seen by the signal handler.
+pub static STACK_OVERFLOW_TRAPS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(feature = "debug")]
 pub(crate) use self::backtrace::Activation;
 pub use self::backtrace::Backtrace;
@@ -1072,6 +1076,21 @@ impl CallThreadState {
         let Some(trap) = code.lookup_trap_code(text_offset) else {
             return TrapTest::NotWasm;
         };
+
+        // [wasmfx] Intercept stack-overflow traps. Nothing is grown yet; this
+        // only proves the handler sees them. Must stay async-signal-safe:
+        // no allocation, no locks, no println!.
+        #[cfg(all(has_native_signals, unix, not(miri)))]
+        if matches!(
+            trap,
+            wasmtime_environ::CompiledTrap::Normal(wasmtime_environ::Trap::StackOverflow)
+        ){
+            STACK_OVERFLOW_TRAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let msg = b"[wasmfx] stack overflow trap intercepted\n";
+            unsafe {
+                libc::write(2, msg.as_ptr().cast(), msg.len());
+            }
+        }
 
         // If all that passed then this is indeed a wasm trap, so return the
         // `Handler` setup in the original wasm frame.
