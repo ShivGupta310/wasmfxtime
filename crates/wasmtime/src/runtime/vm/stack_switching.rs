@@ -242,7 +242,7 @@ pub fn cont_new(
     // `wasmtime::runtime::func::EntryStoreContext::enter_wasm`.
     // [wasmfx] EXPERIMENT: when true, set the limit to 0 so the prologue
     // check never fires and overflow runs into the guard page instead.
-    const WASMFX_NO_CONT_LIMIT: bool = true;
+    const WASMFX_NO_CONT_LIMIT: bool = false;
     let wasm_stack_limit = if WASMFX_NO_CONT_LIMIT {
         0
     } else {
