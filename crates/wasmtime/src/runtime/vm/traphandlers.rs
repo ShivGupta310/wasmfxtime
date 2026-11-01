@@ -1682,6 +1682,23 @@ impl CallThreadState {
                 return None; // no room left: a real overflow
             }
             let new_limit = old_limit.saturating_sub(Self::WASMFX_GROW_STEP).max(floor);
+            // [wasmfx] Real growth: make the newly allowed region usable
+            // *before* moving the limit into it. Host code may run up to
+            // HOST_HEADROOM below the limit, so open that too.
+            // Everything from old_limit - HEADROOM upward is already usable
+            // (initial 2 MiB, or a previous growth), so this covers the gap.
+            let page = crate::runtime::vm::host_page_size();
+            let commit_from = (new_limit - Self::WASMFX_HOST_HEADROOM) & !(page - 1);
+            if libc::mprotect(
+                commit_from as *mut libc::c_void,
+                old_limit - commit_from,
+                libc::PROT_READ | libc::PROT_WRITE,
+            ) != 0
+            {
+                let msg = b"[wasmfx] mprotect failed, cannot grow\n";
+                libc::write(2, msg.as_ptr().cast(), msg.len());
+                return None;
+            }
             *(*vsc).stack_limit.get() = new_limit; // the live limit the prologue reads
             (*contref).common_stack_information.limits.stack_limit = new_limit; // saved copy
 

@@ -108,8 +108,11 @@ impl VMContinuationStack {
         };
 
         unsafe {
-            // Add in one page for a guard page and then ask for some memory.
-            let mmap_len = size + page_size;
+            // [wasmfx] Reserve a large region up front, but only make the top
+            // `size` bytes usable. Everything below stays PROT_NONE until the
+            // stack grows into it. Reservation size is a tunable.
+            const WASMFX_STACK_RESERVE: usize = 64 << 20; // 64 MiB
+            let mmap_len = core::cmp::max(WASMFX_STACK_RESERVE, size + page_size);
 
             #[cfg(asan)]
             if let Some((base, len)) = {
@@ -137,7 +140,7 @@ impl VMContinuationStack {
             )?;
 
             rustix::mm::mprotect(
-                mmap.cast::<u8>().add(page_size).cast(),
+                mmap.cast::<u8>().add(mmap_len - size).cast(), // [wasmfx] top `size` bytes only
                 size,
                 rustix::mm::MprotectFlags::READ | rustix::mm::MprotectFlags::WRITE,
             )?;
