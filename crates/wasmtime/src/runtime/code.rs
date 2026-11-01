@@ -125,6 +125,14 @@ pub struct EngineCode {
 }
 
 impl EngineCode {
+    /// [wasmfx] Hand the module's function table to the underlying code so
+    /// the signal handler can map a PC to its function's start.
+    pub(crate) fn set_func_table(
+        &self,
+        table: Arc<wasmtime_environ::CompiledFunctionsTable>,
+    ) {
+        self.original_code.set_func_table(table);
+    }
     pub fn new(
         mmap: Arc<CodeMemory>,
         signatures: TypeCollection,

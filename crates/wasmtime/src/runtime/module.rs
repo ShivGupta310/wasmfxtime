@@ -550,6 +550,8 @@ impl Module {
         index: Arc<CompiledFunctionsTable>,
         serializable: bool,
     ) -> Result<Self> {
+        // [wasmfx] Let the trap handler find function starts in this code.
+        code.set_func_table(index.clone());
         let checksum = info.checksum;
         let module = CompiledModule::from_artifacts(code.clone(), info, index, engine.profiler())?;
 

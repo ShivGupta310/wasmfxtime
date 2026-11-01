@@ -48,6 +48,10 @@ pub struct CodeMemory {
     wasm_dwarf: Range<usize>,
     wasm_bytecode: Range<usize>,
     wasm_bytecode_ends: Range<usize>,
+
+    /// [wasmfx] Function table for this image, filled once the Module is
+    /// built, so the signal handler can find function start addresses.
+    func_table: std::sync::OnceLock<alloc::sync::Arc<wasmtime_environ::CompiledFunctionsTable>>,
 }
 
 impl Drop for CodeMemory {
@@ -281,6 +285,7 @@ impl CodeMemory {
             wasm_data,
             wasm_bytecode,
             wasm_bytecode_ends,
+            func_table: std::sync::OnceLock::new(),
         })
     }
 
@@ -723,4 +728,21 @@ fn subslice_range(inner: &[u8], outer: &[u8]) -> Range<usize> {
 
     let start = inner.as_ptr() as usize - outer.as_ptr() as usize;
     start..start + inner.len()
+}
+
+
+// [wasmfx] Access to the function table from the trap handler.
+impl CodeMemory {
+    pub(crate) fn set_func_table(
+        &self,
+        table: alloc::sync::Arc<wasmtime_environ::CompiledFunctionsTable>,
+    ) {
+        let _ = self.func_table.set(table);
+    }
+
+    pub(crate) fn func_table(
+        &self,
+    ) -> Option<&alloc::sync::Arc<wasmtime_environ::CompiledFunctionsTable>> {
+        self.func_table.get()
+    }
 }
