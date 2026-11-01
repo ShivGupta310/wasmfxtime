@@ -75,6 +75,9 @@ pub(crate) enum TrapTest {
     HandledByEmbedder,
     /// This is a wasm trap, it needs to be handled.
     Trap(Handler),
+    /// [wasmfx] Resume at the given pc/sp/fp, leaving every other register
+    /// untouched. Used to restart a function after growing its stack.
+    Retry(Handler),
 }
 
 fn lazy_per_thread_init() {
@@ -1126,31 +1129,21 @@ impl CallThreadState {
             return TrapTest::NotWasm;
         };
 
-        // [wasmfx] Intercept stack-overflow traps. Nothing is grown yet; this
-        // only proves the handler sees them. Must stay async-signal-safe:
-        // no allocation, no locks, no println!.
+        // [wasmfx] Stack-overflow hook. On a continuation, try to grow by
+        // lowering the stack limit, then restart the overflowing function.
         #[cfg(all(has_native_signals, unix, not(miri)))]
         if matches!(
             trap,
             wasmtime_environ::CompiledTrap::Normal(wasmtime_environ::Trap::StackOverflow)
-        ){
+        ) {
             STACK_OVERFLOW_TRAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            //check which stack is running/Plain ptr read signal safe
-            let on_continuation = unsafe{
-                let vsc = self.vm_store_context.get().as_ref();
-                matches!(
-                    *(*vsc).stack_chain.get(),
-                    crate::runtime::vm::stack_switching::VMStackChain::Continuation(_)
-                )
-            };
-            let msg: &[u8] = if on_continuation {
-                b"[wasmfx] stack overflow on CONTINUATION stack\n"
-            } else {
-                b"[wasmfx] stack overflow on MAIN stack\n"
-            };
-            unsafe {
-                libc::write(2, msg.as_ptr().cast(), msg.len());
+            if let Some(retry) =
+                unsafe { self.wasmfx_try_grow(&code, text_offset, regs.pc, regs.fp) }
+            {
+                return TrapTest::Retry(retry);
             }
+            let msg = b"[wasmfx] stack overflow: cannot grow, trapping\n";
+            unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
         }
 
         // If all that passed then this is indeed a wasm trap, so return the
@@ -1635,5 +1628,69 @@ pub(crate) mod tls {
     pub fn with<R>(closure: impl FnOnce(Option<&CallThreadState>) -> R) -> R {
         let p = raw::get();
         unsafe { closure(if p.is_null() { None } else { Some(&*p) }) }
+    }
+}
+
+// [wasmfx] Growable continuation stacks (prototype, x86_64 Linux only).
+#[cfg(all(has_native_signals, unix, not(miri)))]
+impl CallThreadState {
+    /// How far to lower the stack limit on each overflow.
+    const WASMFX_GROW_STEP: usize = 64 * 1024;
+    /// Space always left free at the bottom of the stack for host code.
+    const WASMFX_HOST_HEADROOM: usize = 64 * 1024;
+
+    unsafe fn wasmfx_try_grow(
+        &self,
+        code: &crate::code_memory::CodeMemory,
+        text_offset: usize,
+        pc: usize,
+        fp: usize,
+    ) -> Option<Handler> {
+        use crate::runtime::vm::stack_switching::VMStackChain;
+        unsafe {
+            let vsc = self.vm_store_context.get().as_ptr();
+
+            // 1. Only continuation stacks grow.
+            let contref = match &*(*vsc).stack_chain.get() {
+                VMStackChain::Continuation(c) => c.as_ptr(),
+                _ => return None,
+            };
+            let stack = (*contref).fiber_stack();
+            if stack.is_from_raw_parts() {
+                return None;
+            }
+            let range = stack.range()?;
+
+            // 2. Find the start of the overflowing function. Check it begins
+            //    with `push rbp` (0x55), the prologue shape we rely on.
+            let table = code.func_table()?;
+            let key = table.func_by_text_offset(u32::try_from(text_offset).ok()?)?;
+            let loc = table.func_loc(key)?;
+            let func_start = pc - text_offset + loc.start as usize;
+            if *(func_start as *const u8) != 0x55 {
+                let msg = b"[wasmfx] function start does not look like push rbp\n";
+                libc::write(2, msg.as_ptr().cast(), msg.len());
+                return None;
+            }
+
+            // 3. Lower the limit by one step, never below the floor
+            //    (guard page + headroom for host code).
+            let floor =
+                range.start + crate::runtime::vm::host_page_size() + Self::WASMFX_HOST_HEADROOM;
+            let old_limit = *(*vsc).stack_limit.get();
+            if old_limit <= floor {
+                return None; // no room left: a real overflow
+            }
+            let new_limit = old_limit.saturating_sub(Self::WASMFX_GROW_STEP).max(floor);
+            *(*vsc).stack_limit.get() = new_limit; // the live limit the prologue reads
+            (*contref).common_stack_information.limits.stack_limit = new_limit; // saved copy
+
+            let msg = b"[wasmfx] grew continuation stack limit, retrying\n";
+            libc::write(2, msg.as_ptr().cast(), msg.len());
+
+            // 4. Undo `push rbp; mov rbp, rsp` and restart the function.
+            let saved_fp = *(fp as *const usize);
+            Some(Handler { pc: func_start, sp: fp + 8, fp: saved_fp })
+        }
     }
 }

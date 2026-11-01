@@ -185,6 +185,12 @@ unsafe extern "C" fn trap_handler(
                 }
                 true
             }
+            TrapTest::Retry(handler) => {
+                unsafe {
+                    store_retry_in_ucontext(context, &handler);
+                }
+                true
+            }
         }
     });
 
@@ -362,6 +368,15 @@ unsafe fn get_trap_registers(cx: *mut libc::c_void, _signum: libc::c_int) -> Tra
             panic!();
         }
     }
+}
+
+/// [wasmfx] Like `store_handler_in_ucontext`, but only rewrites pc, sp and
+/// fp, so argument registers survive. Prototype: x86_64 Linux only.
+unsafe fn store_retry_in_ucontext(cx: *mut libc::c_void, handler: &Handler) {
+    let cx = unsafe { cx.cast::<libc::ucontext_t>().as_mut().unwrap() };
+    cx.uc_mcontext.gregs[libc::REG_RIP as usize] = handler.pc as _;
+    cx.uc_mcontext.gregs[libc::REG_RSP as usize] = handler.sp as _;
+    cx.uc_mcontext.gregs[libc::REG_RBP as usize] = handler.fp as _;
 }
 
 /// Updates the siginfo context stored in `cx` to resume to `handler` upon
