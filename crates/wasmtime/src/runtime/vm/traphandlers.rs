@@ -38,6 +38,18 @@ use wasmtime_unwinder::Handler;
 pub static STACK_OVERFLOW_TRAPS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
+/// [wasmfx] Debug messages from the overflow/growth path. Compiled out unless
+/// the engine is built with `WASMFX_DEBUG=1 cargo build ...`, so a normal
+/// build pays nothing (important for benchmarking the growth path).    
+const WASMFX_DEBUG: bool = option_env!("WASMFX_DEBUG").is_some();
+
+#[inline(always)]
+fn wasmfx_log(msg: &[u8]) {
+    if WASMFX_DEBUG {
+        unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+    }
+}
+
 #[cfg(feature = "debug")]
 pub(crate) use self::backtrace::Activation;
 pub use self::backtrace::Backtrace;
@@ -1109,8 +1121,7 @@ impl CallThreadState {
             };
             if let (Some(addr), Some(guard)) = (faulting_addr, guard) {
                 if guard.contains(&addr) {
-                    let msg = b"[wasmfx] SIGSEGV in CONTINUATION guard page -> StackOverflow\n";
-                    unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+                    wasmfx_log(b"[wasmfx] SIGSEGV in CONTINUATION guard page -> StackOverflow\n");
                     self.set_jit_trap(
                         regs,
                         None,
@@ -1142,8 +1153,7 @@ impl CallThreadState {
             {
                 return TrapTest::Retry(retry);
             }
-            let msg = b"[wasmfx] stack overflow: cannot grow, trapping\n";
-            unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+            wasmfx_log(b"[wasmfx] stack overflow: cannot grow, trapping\n");
         }
 
         // If all that passed then this is indeed a wasm trap, so return the
@@ -1668,8 +1678,7 @@ impl CallThreadState {
             let loc = table.func_loc(key)?;
             let func_start = pc - text_offset + loc.start as usize;
             if *(func_start as *const u8) != 0x55 {
-                let msg = b"[wasmfx] function start does not look like push rbp\n";
-                libc::write(2, msg.as_ptr().cast(), msg.len());
+                wasmfx_log(b"[wasmfx] function start does not look like push rbp\n");
                 return None;
             }
 
@@ -1695,15 +1704,13 @@ impl CallThreadState {
                 libc::PROT_READ | libc::PROT_WRITE,
             ) != 0
             {
-                let msg = b"[wasmfx] mprotect failed, cannot grow\n";
-                libc::write(2, msg.as_ptr().cast(), msg.len());
+                wasmfx_log(b"[wasmfx] mprotect failed, cannot grow\n");
                 return None;
             }
             *(*vsc).stack_limit.get() = new_limit; // the live limit the prologue reads
             (*contref).common_stack_information.limits.stack_limit = new_limit; // saved copy
 
-            let msg = b"[wasmfx] grew continuation stack limit, retrying\n";
-            libc::write(2, msg.as_ptr().cast(), msg.len());
+            wasmfx_log(b"[wasmfx] grew continuation stack limit, retrying\n");
 
             // 4. Undo `push rbp; mov rbp, rsp` and restart the function.
             let saved_fp = *(fp as *const usize);
