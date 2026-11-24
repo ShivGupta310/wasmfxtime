@@ -139,6 +139,18 @@ impl VMContinuationStack {
                 rustix::mm::MapFlags::PRIVATE,
             )?;
 
+
+            // [wasmfx] No transparent huge pages for continuation stacks. The
+            // 64 MiB reservation comes back 2 MiB-aligned, so with THP=always
+            // the kernel backs the usable top 2 MiB with a single huge page on
+            // first touch: ~2 MiB RSS plus a 2 MiB zeroing per continuation
+            // (measured: 2.7x slower creation, 1.7 GB vs 60 MB RSS for 10k
+            // live continuations). Best effort: harmlessly fails on kernels
+            // built without THP. Set on the whole region before mprotect
+            // splits it, so every part inherits the flag.
+            #[cfg(target_os = "linux")]
+            let _ = rustix::mm::madvise(mmap, mmap_len, rustix::mm::Advice::LinuxNoHugepage);
+
             rustix::mm::mprotect(
                 mmap.cast::<u8>().add(mmap_len - size).cast(), // [wasmfx] top `size` bytes only
                 size,
